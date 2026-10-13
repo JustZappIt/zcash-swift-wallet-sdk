@@ -23,8 +23,8 @@ use pczt::{
     roles::{combiner::Combiner, prover::Prover},
 };
 use prost::Message;
-use rand::rngs::OsRng;
-use secrecy::Secret;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
+use secrecy::{ExposeSecret, Secret};
 use tor_rtcompat::ToplevelBlockOn as _;
 use tracing::{debug, metadata::LevelFilter};
 use tracing_subscriber::prelude::*;
@@ -35,7 +35,10 @@ use transparent::{
     bundle::{OutPoint, TxOut},
     keys::TransparentKeyScope,
 };
-use zcash_address::ZcashAddress;
+use zcash_address::{
+    ZcashAddress,
+    unified::{self, Encoding},
+};
 use zcash_client_backend::{
     address::Address,
     data_api::{
@@ -185,7 +188,7 @@ pub(crate) unsafe fn wallet_db(
     db_data: *const u8,
     db_data_len: usize,
     network: NetworkParams,
-) -> anyhow::Result<WalletDb<rusqlite::Connection, NetworkParams, SystemClock, OsRng>> {
+) -> anyhow::Result<WalletDb<rusqlite::Connection, NetworkParams, SystemClock, UnwrapErr<SysRng>>> {
     let db_data = Path::new(OsStr::from_bytes(unsafe {
         slice::from_raw_parts(db_data, db_data_len)
     }));
@@ -197,8 +200,10 @@ pub(crate) unsafe fn wallet_db(
         .map_err(|e| anyhow!("Error setting wallet database busy_timeout: {}", e))?;
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| anyhow!("Error loading wallet database array module: {}", e))?;
-    Ok(WalletDb::from_connection(conn, network, SystemClock, OsRng)
-        .with_anchor_retention_interval(anchor_retention_interval(network)))
+    Ok(
+        WalletDb::from_connection(conn, network, SystemClock, UnwrapErr(SysRng))
+            .with_anchor_retention_interval(anchor_retention_interval(network)),
+    )
 }
 
 /// Helper method for construcing a FsBlockDb value from path data provided over the FFI.
@@ -600,7 +605,7 @@ pub unsafe extern "C" fn zcashlc_create_account(
         let encoded = usk.to_bytes(Era::Orchard);
         Ok(Box::into_raw(Box::new(ffi::BinaryKey::new(
             account_uuid,
-            encoded,
+            encoded.expose_secret().clone(),
         ))))
     });
     unwrap_exc_or_null(res)
@@ -887,7 +892,8 @@ pub unsafe extern "C" fn zcashlc_get_current_address(
             UnifiedAddressRequest::AllAvailableKeys,
         ) {
             Ok(Some(ua)) => {
-                let address_str = ua.encode(&network);
+                let address_str =
+                    encode_revision_0::<unified::Address>(ua.encode_receiver_preserving(&network));
                 Ok(CString::new(address_str).unwrap().into_raw())
             }
             Ok(None) => Err(anyhow!(
@@ -1052,7 +1058,8 @@ pub unsafe extern "C" fn zcashlc_get_next_available_address(
 
         match db_data.get_next_available_address(account_uuid, address_request) {
             Ok(Some((ua, _))) => {
-                let address_str = ua.encode(&network);
+                let address_str =
+                    encode_revision_0::<unified::Address>(ua.encode_receiver_preserving(&network));
                 Ok(CString::new(address_str).unwrap().into_raw())
             }
             Ok(None) => Err(anyhow!(
@@ -1414,8 +1421,6 @@ pub unsafe extern "C" fn zcashlc_seed_fingerprint(
         }
 
         let seed = Secret::new((unsafe { slice::from_raw_parts(seed, seed_len) }).to_vec());
-
-        use secrecy::ExposeSecret;
 
         let signature = match SeedFingerprint::from_seed(seed.expose_secret()) {
             Some(fp) => fp,
@@ -2894,6 +2899,8 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
         let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             &mut db_data,
             &network,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             &prover,
             &prover,
             &SpendingKeys::from_unified_spending_key(usk),
@@ -3023,6 +3030,8 @@ pub unsafe extern "C" fn zcashlc_create_pczt_from_proposal(
             let pczt = create_pczt_from_proposal::<_, _, Infallible, _, Infallible, _>(
                 &mut db_data,
                 &network,
+                &SystemClock,
+                &mut UnwrapErr(SysRng),
                 account_uuid,
                 OvkPolicy::Sender,
                 &proposal,
@@ -3202,6 +3211,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
                 })?;
             prover = prover
                 .create_orchard_proof(
+                    UnwrapErr(SysRng),
                     zcash_primitives::transaction::builder::cached_orchard_proving_key(
                         circuit_version,
                     ),
@@ -3225,6 +3235,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
                 })?;
             prover = prover
                 .create_ironwood_proof(
+                    UnwrapErr(SysRng),
                     zcash_primitives::transaction::builder::cached_orchard_proving_key(
                         circuit_version,
                     ),
@@ -3250,7 +3261,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
             let local_prover = LocalTxProver::new(spend_params, output_params);
 
             prover = prover
-                .create_sapling_proofs(&local_prover, &local_prover)
+                .create_sapling_proofs(UnwrapErr(SysRng), &local_prover, &local_prover)
                 .map_err(|e| anyhow!("Failed to create Sapling proofs for PCZT: {:?}", e))?;
         }
         assert!(!prover.requires_sapling_proofs());
@@ -3367,6 +3378,8 @@ pub unsafe extern "C" fn zcashlc_extract_and_store_from_pczt(
 
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
             &mut db_data,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             pczt,
             sapling_vk.as_ref().map(|(s, o)| (s, o)),
             None,
@@ -3869,7 +3882,7 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd(
         let rate = tor_runtime.runtime().block_on(async {
             tor_runtime
                 .client()
-                .get_latest_zec_to_usd_rate(&exchanges)
+                .get_latest_zec_to_usd_rate(&mut UnwrapErr(SysRng), &exchanges)
                 .await
         })?;
 
@@ -4001,7 +4014,7 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd_from(
         let rate = tor_runtime.runtime().block_on(async {
             tor_runtime
                 .client()
-                .get_latest_zec_to_usd_rate(&exchanges)
+                .get_latest_zec_to_usd_rate(&mut UnwrapErr(SysRng), &exchanges)
                 .await
         })?;
 
@@ -4626,6 +4639,8 @@ pub extern "C" fn zcashlc_set_custom_network(
         nu6_1: height(nu6_1),
         nu6_2: height(nu6_2),
         nu6_3: height(nu6_3),
+        // The FFI takes no NU7 height, so a custom network never activates NU7.
+        nu7: None,
     };
 
     match CUSTOM_PARAMS.write() {
@@ -4663,6 +4678,19 @@ pub(crate) fn parse_network(value: u32) -> anyhow::Result<NetworkParams> {
             NETWORK_ID_MAINNET,
             NETWORK_ID_REGTEST,
         )),
+    }
+}
+
+/// zcash_keys encodes unified addresses and viewing keys as ZIP 316 Revision 2, which earlier
+/// SDK releases cannot parse. Without metadata, the Revision 0 encoding holds the same items.
+pub(crate) fn encode_revision_0<T: Encoding>(encoded: String) -> String {
+    match T::decode(&encoded) {
+        Ok((net, _, container)) if container.metadata_items().is_empty() => {
+            T::try_from_items(unified::Revision::R0, container.items_as_parsed().to_vec())
+                .map(|container| container.encode(&net))
+                .unwrap_or(encoded)
+        }
+        _ => encoded,
     }
 }
 
@@ -4758,6 +4786,7 @@ mod tests {
                 nu6_1: height,
                 nu6_2: height,
                 nu6_3: height,
+                nu7: height,
             },
         };
         assert_eq!(

@@ -9,6 +9,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Changes are relative to `2.8.0-rc.3`.
 
 ## Added
+- Address validation and payment recipients accept ZIP 316 Revision 2 unified addresses, and
+  viewing-key validation accepts Revision 2 viewing keys. A payment to a Revision 2 address fails if
+  the address has expired, or would expire before the transaction does. Addresses and viewing keys
+  the SDK returns are still Revision 0 encodings.
+
 - The shielded voting surface (`VotingRustBackend`, the public `Voting*` types,
   `PirSnapshotResolver`/`PirSnapshotProbing`/`HTTPPirSnapshotProbe`, and the
   `zcashlc_voting_*` FFI) is restored on the Ironwood (NU6.3) stack, having been
@@ -75,6 +80,15 @@ Changes are relative to `2.8.0-rc.3`.
   indices to resubmit.
 
 ## Changed
+
+- The Rust core builds against the librustzcash NU7 pre-releases (`zcash_protocol` 0.11.0-pre.0).
+  Testnet transactions from block 4,465,026 on use consensus branch ID `0x77190ad9`; a build
+  without this change signs them with the NU6.3 ID, which lightwalletd rejects. Mainnet has no NU7
+  activation height and is unchanged.
+- The first open of a wallet database migrates it to the `zcash_client_sqlite` 0.23 schema. A build
+  without this change cannot open a migrated database.
+- Every `VotingRustBackend` call throws `VotingRustBackendError.rustError`, because `zcash_voting`
+  has no release for these crates.
 
 - Voting is pinned to `zcash_voting = "=3.0.0"` (exactly; a non-`=` requirement resolves to
   1.0.0). The 2.0 family made the PIR layout an explicit client/server handshake, so
@@ -173,6 +187,10 @@ Changes are relative to `2.8.0-rc.3`.
   wallet's own mined transactions).
 
 ## Fixed
+
+- Server validation checks that the server serves Ironwood data whenever Ironwood is active at the
+  server's tip, rather than only while the server reports the NU6.3 branch ID, so it keeps checking
+  testnet servers after NU7.
 
 - Transactions created from both ordinary proposals and finalized PCZTs are now returned for
   broadcast from the wallet store instead of being reconstructed from `v_transactions`. If that

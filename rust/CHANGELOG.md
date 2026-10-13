@@ -8,6 +8,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Functions that parse a unified address or viewing key accept ZIP 316 Revision 2 encodings. Those
+  that return one still return its Revision 0 encoding.
+
 - `zcashlc_get_transaction`, `zcashlc_free_transaction_data`, and `FfiTransactionData` expose the
   serialized bytes and expiry height available for any wallet-store transaction without depending
   on the transaction-history projection.
@@ -205,6 +208,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself never touches.
 
 ### Changed
+- Every `zcashlc_voting_*` function fails, setting the last error to "Shielded voting is
+  unavailable in this build" and returning `NULL` or `-1`. The signatures are unchanged.
+- `zcashlc_set_custom_network` takes no NU7 height, so a custom network never activates NU7.
 - The `zcashlc_voting_*` FFI is compiled again, against the Ironwood (NU6.3)
   dependency stack. It had been gated behind `#[cfg(zcash_voting)]` on the
   grounds that `zcash_voting` could not resolve against the Ironwood `orchard`
